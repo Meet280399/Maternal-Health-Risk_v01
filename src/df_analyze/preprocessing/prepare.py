@@ -12,6 +12,13 @@ from warnings import warn
 import jsonpickle
 import numpy as np
 import pandas as pd
+from numpy import ndarray
+from numpy.random import Generator
+from pandas import DataFrame, Series
+from sklearn.experimental import enable_iterative_imputer  # noqa
+from sklearn.model_selection import ShuffleSplit, StratifiedShuffleSplit
+from sklearn.preprocessing import KBinsDiscretizer
+
 from df_analyze._constants import (
     N_CAT_LEVEL_MIN,
     N_TARG_LEVEL_MIN,
@@ -37,12 +44,6 @@ from df_analyze.preprocessing.inspection.inspection import (
     unify_nans,
 )
 from df_analyze.timing import timed
-from numpy import ndarray
-from numpy.random import Generator
-from pandas import DataFrame, Series
-from sklearn.experimental import enable_iterative_imputer  # noqa
-from sklearn.model_selection import ShuffleSplit, StratifiedShuffleSplit
-from sklearn.preprocessing import KBinsDiscretizer
 
 
 @dataclass
@@ -215,6 +216,7 @@ class PreparedData:
         self,
         X: DataFrame,
         y: Series,
+        groups: Optional[Series],
         is_classification: Optional[bool] = None,
         X_cont: Optional[DataFrame] = None,
         X_cat: Optional[DataFrame] = None,
@@ -275,6 +277,7 @@ class PreparedData:
         self.y: Series = y
         self.target = self.y.name
         self.labels = labels or {}
+        self.groups: Optional[Series] = groups
 
     @property
     def num_classes(self) -> int:
@@ -305,6 +308,7 @@ class PreparedData:
     def subsample(self, idx: ndarray) -> PreparedData:
         X_sub = self.X.iloc[idx]
         X_cont, X_cat = self.X_cont, self.X_cat
+        groups = None if self.groups is None else self.groups.iloc[idx]
         if self.info is not None:
             info_sub = deepcopy(self.info)
             info_sub.final_shape = X_sub.shape
@@ -315,6 +319,7 @@ class PreparedData:
             X_cont=None if X_cont is None else X_cont.iloc[idx],
             X_cat=None if X_cat is None else X_cat.iloc[idx],
             y=self.y.iloc[idx].copy(),
+            groups=groups,
             labels=self.labels,
             inspection=self.inspection,
             info=info_sub,
@@ -326,9 +331,21 @@ class PreparedData:
         n_sub: int = UNIVARIATE_PRED_MAX_N_SAMPLES,
         rng: Optional[Generator] = None,
     ) -> tuple[PreparedData, ndarray]:
+        rng = rng or np.random.default_rng()
         X, X_cont, X_cat = self.X, self.X_cont, self.X_cat
         y = self.y
-        rng = rng or np.random.default_rng()
+
+        g = self.groups
+        if g is not None:
+            warn(
+                "Grouping is currently NOT implemented for `representative_subsample`. "
+                "The grouping variable will be ignored when creating a minimal viable "
+                "subsample. This may introduce a significant bias in the unviariate "
+                "predictions if samples from the same group end up distributed across "
+                "subsequent training and test splits. However, this bias will be limited "
+                "to the univariate predictive stats. Grouping is handled properly in all "
+                "subsequent df-analyze splitting procedures."
+            )
 
         if len(X) <= UNIVARIATE_PRED_MAX_N_SAMPLES:
             return self, np.arange(len(X), dtype=np.int64)
@@ -341,6 +358,8 @@ class PreparedData:
                 X_cont = X_cont.iloc[idx]
             if X_cat is not None:
                 X_cat = X_cat.iloc[idx]
+            if g is not None:
+                g = g.iloc[idx]
             y = y.iloc[idx]
         else:
             kb = KBinsDiscretizer(n_bins=5, encode="ordinal")
@@ -354,12 +373,15 @@ class PreparedData:
                 X_cont = X_cont.loc[idx, :].copy(deep=True)
             if X_cat is not None:
                 X_cat = X_cat.loc[idx, :].copy(deep=True)
+            if g is not None:
+                g = g.iloc[idx]
 
         return PreparedData(
             X=X,
             X_cont=X_cont,
             X_cat=X_cat,
             y=y,
+            groups=g,
             labels=self.labels,
             inspection=self.inspection,
             info=self.info,
@@ -510,6 +532,7 @@ def prepare_target(
 def prepare_data(
     df: DataFrame,
     target: str,
+    grouper: Optional[str],
     results: InspectionResults,
     is_classification: bool,
     _warn: bool = True,
@@ -540,7 +563,7 @@ def prepare_data(
     orig_shape = (df.shape[0], df.shape[1] - 1)
 
     df = timer(unify_nans)(df)
-    df = timer(convert_categoricals)(df, target)
+    df = timer(convert_categoricals)(df=df, target=target, grouper=grouper)
     info = timer(inspect_target)(df, target, is_classification=is_classification)
     df, n_targ_drop = timer(drop_target_nans)(df, target)
     if is_classification:
@@ -551,21 +574,27 @@ def prepare_data(
 
     df = timer(drop_unusable)(df, results, _warn=_warn)
     df, X_cont, n_ind_added = handle_continuous_nans(
-        df=df, target=target, results=results, nans=NanHandling.Median
+        df=df, target=target, grouper=grouper, results=results, nans=NanHandling.Median
     )
     X_cont = normalize_continuous(X_cont, robust=True)
 
-    df = timer(deflate_categoricals)(df, results, _warn=_warn)
+    df = timer(deflate_categoricals)(df, grouper, results, _warn=_warn)
     df, X_cat = timer(encode_categoricals)(
-        df, target, results=results, warn_explosion=_warn
+        df=df, target=target, grouper=grouper, results=results, warn_explosion=_warn
     )
 
     X = df.drop(columns=target).reset_index(drop=True)
+    if grouper is not None:
+        g = df[grouper]
+        X = df.drop(columns=grouper)
+    else:
+        g = None
     return PreparedData(
         X=X,
         X_cont=X_cont,
         X_cat=X_cat,
         y=y,
+        groups=g,
         labels=labels,
         info=PreparationInfo(
             original_shape=orig_shape,

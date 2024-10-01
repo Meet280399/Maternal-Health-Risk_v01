@@ -547,12 +547,14 @@ def convert_categorical(series: Series) -> Series:
     return series
 
 
-def convert_categoricals(df: DataFrame, target: str) -> DataFrame:
+def convert_categoricals(df: DataFrame, target: str, grouper: Optional[str]) -> DataFrame:
     # convert screwy categorical columns which can have all sorts of
     # annoying behaviours when incorrectly labeled as such
     df = df.copy()
     for col in df.columns:
         if str(col) == target:
+            continue
+        if (grouper is not None) and str(col) == grouper:
             continue
         df[col] = convert_categorical(df[col])
     return df
@@ -574,6 +576,7 @@ def unify_nans(df: Union[DataFrame, Series]) -> Union[DataFrame, Series]:
 def inspect_data(
     df: DataFrame,
     target: str,
+    grouper: Optional[str] = None,
     categoricals: Optional[list[str]] = None,
     ordinals: Optional[list[str]] = None,
     drops: Optional[list[str]] = None,
@@ -583,8 +586,12 @@ def inspect_data(
     categoricals = categoricals or []
     ordinals = ordinals or []
     y = df[target]
+    g = df[grouper] if (grouper is not None) else None
 
     df = df.drop(columns=target, errors="ignore")
+    if g is not None:
+        df = df.drop(columns=grouper, errors="ignore")
+
     if drops is not None:
         drops = sorted(set(drops))
         df = df.drop(columns=drops, errors="ignore")
