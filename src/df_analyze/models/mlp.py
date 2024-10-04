@@ -37,7 +37,6 @@ from optuna import Study, Trial
 from pandas import DataFrame, Series
 from sklearn.datasets import make_classification
 from sklearn.model_selection import KFold, StratifiedKFold
-
 from skorch import NeuralNetClassifier, NeuralNetRegressor
 from skorch.callbacks import EarlyStopping, LRScheduler
 from skorch.callbacks.lr_scheduler import CosineAnnealingLR
@@ -367,7 +366,12 @@ class MLPEstimator(DfAnalyzeModel):
         return final_args
 
     def optuna_objective(
-        self, X_train: DataFrame, y_train: Series, metric: Scorer, n_folds: int = 3
+        self,
+        X_train: DataFrame,
+        y_train: Series,
+        g_train: Optional[Series],
+        metric: Scorer,
+        n_folds: int = 3,
     ) -> Callable[[Trial], float]:
         X, y = self._to_torch(X_train, y_train)
 
@@ -421,6 +425,7 @@ class MLPEstimator(DfAnalyzeModel):
         self,
         X_train: DataFrame,
         y_train: Series,
+        g_train: Optional[Series],
         metric: Scorer,
         n_trials: int = 100,
         n_jobs: int = -1,
@@ -459,6 +464,7 @@ class MLPEstimator(DfAnalyzeModel):
         return super().htune_optuna(
             X_train=X_train,
             y_train=y_train,
+            g_train=g_train,
             metric=metric,
             n_trials=n_trials,
             verbosity=verbosity,
