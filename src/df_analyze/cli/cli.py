@@ -90,7 +90,6 @@ from df_analyze.cli.text import (
     REG_HELP_STR,
     REG_TUNE_METRIC,
     SEP_HELP_STR,
-    GROUP_HELP_STR,
     SHEET_HELP_STR,
     TARGET_HELP_STR,
     TEST_VALSIZES_HELP,
@@ -163,7 +162,6 @@ class ProgramOptions(Debug):
         self,
         datapath: Optional[Path],
         target: str,
-        grouper: Optional[str],
         grouper: Optional[str],
         categoricals: list[str],
         ordinals: list[str],
@@ -1167,6 +1165,7 @@ def get_options(args: Optional[str] = None) -> ProgramOptions:
     return ProgramOptions(
         datapath=cli_args.spreadsheet if cli_args.df is None else cli_args.df,
         target=" ".join(cli_args.target),  # https://stackoverflow.com/a/26990349,
+        grouper=grouper,
         categoricals=sorted(cats),
         ordinals=sorted(ords),
         drops=cli_args.drops,
