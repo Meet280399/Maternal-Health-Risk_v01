@@ -6,11 +6,12 @@ from shutil import get_terminal_size
 from typing import TYPE_CHECKING, Optional, Union, overload
 
 import numpy as np
-from df_analyze._constants import N_CAT_LEVEL_MIN, NAN_STRINGS
 from joblib import Memory, Parallel, delayed
 from pandas import DataFrame, Series
 from sklearn.experimental import enable_iterative_imputer  # noqa
 from tqdm import tqdm
+
+from df_analyze._constants import N_CAT_LEVEL_MIN, NAN_STRINGS
 
 if TYPE_CHECKING:
     from df_analyze.cli.cli import ProgramOptions
@@ -557,6 +558,9 @@ def convert_categoricals(df: DataFrame, target: str, grouper: Optional[str]) -> 
         if (grouper is not None) and str(col) == grouper:
             continue
         df[col] = convert_categorical(df[col])
+    if grouper is not None:
+        df[grouper] = df[grouper].astype("category").cat.codes
+
     return df
 
 
@@ -684,6 +688,9 @@ def inspect_data(
     # fmt: on
 
     df[target] = y
+    df[grouper] = g
+    df = df.rename(str, axis="columns")  # https://stackoverflow.com/a/77046151
+
     return df, InspectionResults(
         conts=InspectionInfo(ColumnType.Continuous, final_conts),
         ords=InspectionInfo(ColumnType.Ordinal, final_ords),
@@ -709,6 +716,7 @@ def inspect_data_cached(
         return inspect_data(
             df=options.load_df(),
             target=options.target,
+            grouper=None,
             categoricals=options.categoricals,
             ordinals=options.ordinals,
             _warn=True,

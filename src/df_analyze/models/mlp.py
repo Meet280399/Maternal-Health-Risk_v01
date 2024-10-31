@@ -60,6 +60,7 @@ from tqdm import tqdm
 from df_analyze._constants import SEED
 from df_analyze.enumerables import Scorer
 from df_analyze.models.base import DfAnalyzeModel
+from df_analyze.splitting import OmniKFold
 
 """
 See:
@@ -339,18 +340,6 @@ class MLPEstimator(DfAnalyzeModel):
         Xt = self._to_torch(X)
         return self.tuned_model.predict_proba(Xt)
 
-    def score(self, X: DataFrame, y: Series) -> float:
-        Xt, yt = self._to_torch(X, y)
-        if self.model is None:
-            raise RuntimeError("Need to call `model.fit()` before calling `.score()`")
-        return float(self.model.score(Xt, yt))  # type: ignore
-
-    def tuned_score(self, X: DataFrame, y: Series) -> float:
-        Xt, yt = self._to_torch(X, y)
-        if self.tuned_model is None:
-            raise RuntimeError("Need to tune model before calling `.tuned_score()`")
-        return self.tuned_model.score(Xt, yt)
-
     def _to_model_args(
         self, optuna_args: dict[str, Any], X_train: DataFrame
     ) -> dict[str, Any]:
@@ -376,13 +365,21 @@ class MLPEstimator(DfAnalyzeModel):
         X, y = self._to_torch(X_train, y_train)
 
         def objective(trial: Trial) -> float:
-            kf = StratifiedKFold if self.is_classifier else KFold
-            _cv = kf(n_splits=5, shuffle=True, random_state=SEED)
+            kf = OmniKFold(
+                n_splits=n_folds,
+                is_classification=self.is_classifier,
+                grouped=g_train is not None,
+                labels=None,
+                warn_on_fallback=False,
+                df_analyze_phase="Tuning internal splits",
+            )
             opt_args = self.optuna_args(trial)
             model_args = self._to_model_args(opt_args, X_train)
             full_args = {**self.fixed_args, **self.default_args, **model_args}
             scores = []
-            for step, (idx_train, idx_test) in enumerate(_cv.split(X_train, y_train)):
+            for step, (idx_train, idx_test) in enumerate(
+                kf.split(X_train, y_train, g_train)[0]
+            ):
                 X_tr, y_tr = X[idx_train], y[idx_train]
                 X_test, y_test = X[idx_test], y[idx_test]
                 estimator = self.model_cls(**full_args)

@@ -12,6 +12,7 @@ sys.path.append(str(ROOT))  # isort: skip
 File for defining all options passed to `df-analyze.py`.
 """
 import os
+import sys
 import traceback
 from argparse import ArgumentParser, Namespace, RawTextHelpFormatter
 from copy import deepcopy
@@ -31,13 +32,17 @@ from warnings import warn
 import jsonpickle
 import numpy as np
 import pandas as pd
+from pandas import DataFrame
+
 from df_analyze._constants import (
+    VERSION,
     FULL_RESULTS,
     N_WRAPPER_DEFAULT,
     P_FILTER_CAT_DEFAULT,
     P_FILTER_CONT_DEFAULT,
     P_FILTER_TOTAL_DEFAULT,
     SENTINEL,
+    VERSION,
 )
 from df_analyze.analysis.univariate.associate import (
     CatClsStats,
@@ -65,6 +70,7 @@ from df_analyze.cli.text import (
     EXPLODE_HELP,
     FEAT_SELECT_HELP,
     FILTER_METHOD_HELP,
+    GROUP_HELP_STR,
     HTUNE_TRIALS_HELP,
     MODE_HELP_STR,
     N_FEAT_CAT_FILTER_HELP,
@@ -91,6 +97,7 @@ from df_analyze.cli.text import (
     USAGE_EXAMPLES,
     USAGE_STRING,
     VERBOSITY_HELP,
+    VERSION_HELP,
     WRAP_SELECT_HELP,
     WRAP_SELECT_MODEL_HELP,
 )
@@ -110,7 +117,6 @@ from df_analyze.enumerables import (
     WrapperSelectionModel,
 )
 from df_analyze.loading import load_spreadsheet
-from pandas import DataFrame
 
 if TYPE_CHECKING:
     from df_analyze.models.base import DfAnalyzeModel
@@ -158,6 +164,7 @@ class ProgramOptions(Debug):
         datapath: Optional[Path],
         target: str,
         grouper: Optional[str],
+        grouper: Optional[str],
         categoricals: list[str],
         ordinals: list[str],
         drops: list[str],
@@ -203,6 +210,8 @@ class ProgramOptions(Debug):
     ) -> None:
         # memoization-related
         # other
+        self.version = VERSION
+        self.cli_args = " ".join(sys.argv)
         self.datapath: Optional[Path] = self.validate_datapath(datapath)
         self.target: str = target
         self.grouper: Optional[str] = grouper
@@ -444,10 +453,14 @@ class ProgramOptions(Debug):
         )
 
     def to_json(self) -> None:
-        path = self.program_dirs.options
-        if path is None:
-            return
-        path.write_text(str(jsonpickle.encode(self)))
+        try:
+            path = self.program_dirs.options
+            if path is None:
+                return
+            path.write_text(str(jsonpickle.encode(self, unpicklable=False, indent=4)))
+        except Exception as e:
+            print(f"Got error saving options: {e}")
+            traceback.print_exc()
 
     @staticmethod
     def from_json(root: Path) -> ProgramOptions:
@@ -495,6 +508,11 @@ def parse_and_merge_args(parser: ArgumentParser, args: Optional[str] = None) -> 
         if args is None
         else cli_parser.parse_known_args(args.split())[0]
     )
+
+    if cli_args.version:
+        print(f"df-analyze {VERSION}")
+        exit(0)
+
     if cli_args.spreadsheet is None and cli_args.df is None:
         raise ValueError(
             "Must specify one of either `--spreadsheet [file]` or `--df [file]`."
@@ -876,6 +894,11 @@ def make_parser() -> ArgumentParser:
         action="store_true",
         help=EXPLODE_HELP,
     )
+    parser.add_argument(
+        "--version",
+        action="store_true",
+        help=VERSION_HELP,
+    )
     return parser
 
 
@@ -1093,6 +1116,7 @@ def get_options(args: Optional[str] = None) -> ProgramOptions:
     # parser = ArgumentParser(description=DESC)
     parser = make_parser()
     cli_args = parse_and_merge_args(parser, args)
+
     mode = str(cli_args.mode).lower()
     is_cls = True if "class" in mode else False
 
@@ -1137,10 +1161,12 @@ def get_options(args: Optional[str] = None) -> ProgramOptions:
     classifiers = tuple(sorted(classifiers))
     regressors = tuple(sorted(regressors))
 
+    # https://stackoverflow.com/a/26990349,
+    grouper = " ".join(cli_args.grouper) if cli_args.grouper is not None else None
+
     return ProgramOptions(
         datapath=cli_args.spreadsheet if cli_args.df is None else cli_args.df,
         target=" ".join(cli_args.target),  # https://stackoverflow.com/a/26990349,
-        grouper=cli_args.grouper,
         categoricals=sorted(cats),
         ordinals=sorted(ords),
         drops=cli_args.drops,

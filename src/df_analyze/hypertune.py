@@ -60,6 +60,7 @@ if TYPE_CHECKING:
 import jsonpickle
 
 from df_analyze.enumerables import ClassifierScorer, RegressorScorer
+from df_analyze.models.gandalf import GandalfEstimator
 from df_analyze.models.mlp import MLPEstimator
 from df_analyze.preprocessing.prepare import PreparedData
 from df_analyze.scoring import (
@@ -324,8 +325,12 @@ class EvaluationResults:
             "results": self.results,
             "is_classification": self.is_classification,
         }
-        enc = str(jsonpickle.encode(remain))
-        (root / "eval_htune_results.json").write_text(enc)
+        try:
+            enc = str(jsonpickle.encode(remain, unpicklable=False))
+            (root / "eval_htune_results.json").write_text(enc)
+        except TypeError:
+            enc = str(jsonpickle.encode(remain, unpicklable=False, fail_safe=str))
+            (root / "eval_htune_results.json").write_text(enc)
 
     @classmethod
     def load(cls, root: Path) -> EvaluationResults:
@@ -448,6 +453,8 @@ def evaluate_tuned(
 
             if model_cls is MLPEstimator:
                 model = model_cls(num_classes=prepared.num_classes)  # type: ignore
+            elif model_cls is GandalfEstimator:
+                model = model_cls(num_classes=prepared.num_classes)  # type: ignore
             else:
                 model = model_cls()
 
@@ -465,8 +472,10 @@ def evaluate_tuned(
                 df, preds_train, preds_test, probs_train, probs_test = model.htune_eval(
                     X_train=X_train,
                     y_train=prep_train.y,
+                    g_train=prep_train.groups,
                     X_test=X_test,
                     y_test=prep_test.y,
+                    g_test=prep_test.groups,
                 )
                 is_embed = "embed" in selection
                 embed_model = embed_models[selection] if is_embed else None

@@ -22,6 +22,7 @@ from sklearn.preprocessing import KBinsDiscretizer
 from df_analyze._constants import (
     N_CAT_LEVEL_MIN,
     N_TARG_LEVEL_MIN,
+    SEED,
     UNIVARIATE_PRED_MAX_N_SAMPLES,
 )
 from df_analyze.enumerables import NanHandling
@@ -43,6 +44,7 @@ from df_analyze.preprocessing.inspection.inspection import (
     inspect_target,
     unify_nans,
 )
+from df_analyze.splitting import ApproximateStratifiedGroupSplit
 from df_analyze.timing import timed
 
 
@@ -52,6 +54,7 @@ class PrepFiles:
     X_cont_raw: str = "X_cont.parquet"
     X_cat_raw: str = "X_cat.parquet"
     y_raw: str = "y.parquet"
+    g_raw: str = "g.parquet"
     labels: str = "labels.parquet"
     info: str = "info.json"
 
@@ -62,6 +65,7 @@ class PrepFilesTrain:
     X_cont_raw: str = "X_train_cont.parquet"
     X_cat_raw: str = "X_train_cat.parquet"
     y_raw: str = "y_train.parquet"
+    g_raw: str = "g.parquet"
     labels: str = "labels.parquet"
     info: str = "info.json"
 
@@ -72,6 +76,7 @@ class PrepFilesTest:
     X_cont_raw: str = "X_test_cont.parquet"
     X_cat_raw: str = "X_test_cat.parquet"
     y_raw: str = "y_test.parquet"
+    g_raw: str = "g.parquet"
     labels: str = "labels.parquet"
     info: str = "info.json"
 
@@ -277,6 +282,7 @@ class PreparedData:
         self.y: Series = y
         self.target = self.y.name
         self.labels = labels or {}
+        self.split_labels = labels
         self.groups: Optional[Series] = groups
 
     @property
@@ -286,16 +292,36 @@ class PreparedData:
         return len(np.unique(self.y))
 
     def split(
-        self, train_size: Union[int, float] = 0.6
+        self,
+        train_size: Union[int, float] = 0.6,
+        seed: int | None = SEED,
     ) -> tuple[PreparedData, PreparedData]:
         y = self.y.copy()
-        if self.is_classification:
-            ss = StratifiedShuffleSplit(
-                train_size=train_size, n_splits=1, random_state=42
-            )
-        else:
-            ss = ShuffleSplit(train_size=train_size, n_splits=1, random_state=42)
-        idx_train, idx_test = next(ss.split(y, y))  # type: ignore
+        # if self.groups is not None:
+        #     ...
+        #     # TODO: use OmniSplit and n_splits=int(1/desired_test_ratio)
+        #     # and fallback if the train_size is to annoying
+        #     raise NotImplementedError("TODO: Use ApproximateStratifiedGroupSplit")
+        # else:
+        #     if self.is_classification:
+        #         ss = StratifiedShuffleSplit(
+        #             train_size=train_size, n_splits=1, random_state=seed
+        #         )
+        #     else:
+        #         ss = ShuffleSplit(train_size=train_size, n_splits=1, random_state=seed)
+
+        ss = ApproximateStratifiedGroupSplit(
+            train_size=train_size,
+            is_classification=self.is_classification,
+            grouped=self.groups is not None,
+            labels=self.split_labels,
+            seed=seed,
+            warn_on_fallback=True,
+            warn_on_large_size_diff=True,
+            df_analyze_phase="Initial holdout splitting",
+        )
+
+        (idx_train, idx_test), group_fail = ss.split(y.to_frame(), y, self.groups)
 
         prep_train = self.subsample(idx_train)
         prep_train.phase = "train"
@@ -472,6 +498,8 @@ class PreparedData:
             self.X_cont.to_parquet(root / self.files.X_cont_raw)
             self.X_cat.to_parquet(root / self.files.X_cat_raw)
             self.y.to_frame().to_parquet(root / self.files.y_raw)
+            if self.groups is not None:
+                self.groups.to_frame().to_parquet(root / self.files.g_raw)
             if self.labels is not None:
                 Series(self.labels).to_frame().to_parquet(root / self.files.labels)
             if self.info is not None:
@@ -489,7 +517,14 @@ class PreparedData:
         X_cont = pd.read_parquet(root / files.X_cont_raw)
         X_cat = pd.read_parquet(root / files.X_cat_raw)
         y_raw = pd.read_parquet(root / files.y_raw)
+        gfile = root / files.g_raw
+        g_raw = pd.read_parquet(gfile) if gfile.exists() else None
         y = Series(name=y_raw.columns[0], data=y_raw.values.ravel(), index=y_raw.index)
+        g = (
+            Series(name=g_raw.columns[0], data=g_raw.values.ravel(), index=g_raw.index)
+            if g_raw is not None
+            else None
+        )
         labelpath = root / files.labels
         labels: Optional[dict[int, str]]
         if labelpath.exists():
@@ -506,6 +541,7 @@ class PreparedData:
             X_cont=X_cont,
             X_cat=X_cat,
             y=y,
+            groups=g,
             labels=labels,
             inspection=inspection,
             info=info,
@@ -585,8 +621,8 @@ def prepare_data(
 
     X = df.drop(columns=target).reset_index(drop=True)
     if grouper is not None:
-        g = df[grouper]
-        X = df.drop(columns=grouper)
+        g = X[grouper]
+        X = X.drop(columns=grouper)
     else:
         g = None
     return PreparedData(
@@ -606,4 +642,5 @@ def prepare_data(
             is_classification=is_classification,
         ),
         inspection=results,
+        is_classification=is_classification,
     )

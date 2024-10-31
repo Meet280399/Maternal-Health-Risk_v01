@@ -15,11 +15,14 @@
     - [Using a `df-analyze`-formatted Spreadsheet](#using-a-df-analyze-formatted-spreadsheet)
       - [Overriding Spreadsheet Options](#overriding-spreadsheet-options)
   - [Embedding Functionality](#embedding-functionality)
+    - [Quickstart](#quickstart)
+    - [About the Embedding Models](#about-the-embedding-models)
     - [Supported Dataset Formats](#supported-dataset-formats)
       - [Image Data](#image-data)
       - [Text Data](#text-data)
   - [Usage on Compute Canada / Digital Research Alliance of Canada / Slurm HPC Clusters](#usage-on-compute-canada--digital-research-alliance-of-canada--slurm-hpc-clusters)
     - [Building the Singularity Container](#building-the-singularity-container)
+    - [Using the Singularity Container](#using-the-singularity-container)
 - [Analysis Pipeline](#analysis-pipeline)
     - [Feature Type and Cardinality Inference](#feature-type-and-cardinality-inference)
     - [Data Preparation](#data-preparation)
@@ -345,24 +348,173 @@ perhaps if manually cleaning your data and re-running).
 
 ## Embedding Functionality
 
+`df-analyze` now supports the pre-processing of **image** and **text
+classification** datasets through the `df-embed.py` python script.
+
+### Quickstart
+
+The CLI help can be accessed locally by running
+
+```bash
+python df-embed.py --help
+```
+
+Note that before any embedding is possible, you will need to download the
+underlying [embedding models](#about-the-embedding-models) **once**. This can be done
+with either of the commands:
+
+```bash
+python df-embed.py --download --modality nlp
+python df-embed.py --download --modality vision
+```
+
+**NOTE**: Because these models are only using CPUs for inference, the
+**memory requirements may be too high for you to efficiently embed a dataset
+on your local machine**. While the embedding code will work and is tested on
+modern e.g. M-series MacBooks (Air or Pro), this may make use of swap memory,
+which could be unacceptably slow for your dataset(s), depending on your
+machine.
+
+However, on a Linux-based cluster (e.g. CentOS or RedHat, on Compute Canada),
+then inference on CPU on a node with 128GB RAM is quite efficient (datasets
+of 200k to 300k samples should still embed in a few hours, and smaller
+datasets in just a few minutes). But in order to do this, you will need to
+[build the container](#building-the-singularity-container) and then make use
+of the `run_python_with_home.sh` script included in this repo, and paying
+attention to the advice to use `readlink` or `realpath` for all references to
+files.
+
+
+### About the Embedding Models
+
+Internally, `df-analyze` uses two open-source HuggingFace zero-shot
+classification models:
+[SigLIP](https://huggingface.co/docs/transformers/en/model_doc/siglip) for
+image data, and the large variant of the multilingual
+[E5](https://huggingface.co/intfloat/multilingual-e5-large) text embedding
+models. More specifically, the models are
+[`intfloat/multilingual-e5-large`](https://huggingface.co/intfloat/multilingual-e5-large)
+and
+[`google/siglip-so400m-patch14-384`](https://huggingface.co/google/siglip-so400m-patch14-384),
+which produce embedding vectors of size 1024 for each input text, and 1152
+for each input image, respectively.
+
+SigLip is a significant improvement on
+[CLIP](https://huggingface.co/docs/transformers/model_doc/clip), especially
+for zero-shot classification (the main task in `df-analyze`). E5 uses an
+[XLM-RoBERTa
+backbone](https://huggingface.co/docs/transformers/en/model_doc/xlm-roberta),
+but is trained with a focus on producing quality zero-shot embeddings.
+
+
+
 ### Supported Dataset Formats
+
+Currently, `df-analyze` supports only small to medium-sized datasets
+(generally, under 200 features and under 200 000 or so samples), and strongly
+aims to keep compute times under 24 hours (on a typical node on the [Niagara
+cluster](https://docs.alliancecan.ca/wiki/Niagara)) for key operations
+(embedding, predictive analysis). This means **any dataset to be embedded should
+also generally be under abut 200 000 samples**.
+
+For embedding, `df-embed.py` makes use of CPU implementations only, and, to
+not complicate data loading, currently requires a dataset to fit in memory,
+loaded from a single, correctly-formatted `.parquet` file.
 
 #### Image Data
 
+For image classification data (`python df-embed.py --modality vision`), the
+file must be a two-column table with the columns named "image" and "label".
+The order of the columns is not important, but the "label" column must
+contain integers in {0, 1, ..., c - 1}, where `c` is the number of class
+labels for your data. The data type is not really important, however, if
+the table is loaded into a Pandas DataFrame `df`, then running
+`df["label"].astype(np.int64)` (assuming you have imported NumPy as `np`,
+as is convention) should not alter the meaning of the data.
+
+For image regression data (very rare), the file must be a two-column table
+with the columns named "image" and "target". The order of the columns is
+not important, but the "target" column must contain floating point values.
+The floating point data type is not really important, however, if the table
+is loaded into a Pandas DataFrame `df`, then running
+`df["label"].astype(float)` should not raise any exceptions.
+
+The "image" column must be of `bytes` dtype, and must be readable by PIL
+`Image.open`. Internally, all we do, again assuming that the data is loaded
+into a Pandas DataFrame `df`, is run:
+
+```python
+from io import BytesIO
+from PIL import Image
+
+df["image"].apply(lambda raw: Image.open(BytesIO(raw)).convert("RGB"))
+```
+
+to convert images to the necessary format. This means that if you load your
+images using PIL `Image.open`, and you have a list of image paths (and a way
+to infer the target from that path, e.g. `get_target(path: Path)`, then you
+can convert your images to bytes through the use of `io` `BytesIO` objects,
+and build your parquet file with just a few lines of Python:
+
+```python
+img: Image  # PIL Image
+converted = []
+targets = []
+
+for path in my_image_paths:
+    img = Image.open(path)
+    buf = BytesIO()
+    img.save(buf, format="JPEG")
+    byts = buf.getvalue()
+    converted.append(byts)
+    targets.append(get_target(path))
+
+df = DataFrame({"image": converted, "target": targets})
+df.to_parquet("images.parquet")
+```
+
 #### Text Data
 
+For text classification data (`python df-embed.py --modality nlp`), the
+file must be a two-column table with the columns named "text" and "label".
+The order of the columns is not important, but the "label" column must
+contain integers in {0, 1, ..., c - 1}, where `c` is the number of class
+labels for your data. The data type is not really important, however, if
+the table is loaded into a Pandas DataFrame `df`, then running
+`df["label"].astype(np.int64)` (assuming you have imported NumPy as `np`,
+as is convention) should not alter the meaning of the data.
+
+For text regression data (e.g. sentiment analysis, rating prediction), the
+file must be a two-column table with the columns named "text" and
+"target". The order of the columns is not important, but the "target"
+column must contain floating point values. The floating point data type is
+not really important, however, if the table is loaded into a Pandas
+DataFrame `df`, then running `df["label"].astype(float)` should not raise
+any exceptions.
+
+The "text" column will have "object" ("O") dtype. Assuming you have loaded
+your text data into a Pandas DataFrame `df`, then you can check that the
+data has the correct type by running:
+
+```python
+assert df.text.apply(lambda s: isinstance(s, str)).all()
+```
+
+which will raise an AssertionError if a row has an incorrect type.
+
+In order to keep compute times reasonable, it is best for text samples
+to be at most a paragraph or two. I.e. the underlying model is not really
+intended for efficient or effective document embedding. However, this
+ultimately depends on the text language and it is hard to make general
+recommendations here.
 
 ## Usage on Compute Canada / Digital Research Alliance of Canada / Slurm HPC Clusters
 
-If the singularity container `df_analyze.sif` is available in the project
-root, then it can be used to run arbitrary python scripts with the [helper
-script](https://github.com/stfxecutables/df-analyze/blob/master/run_python_with_home.sh)
-inlcluded in the repo. E.g.
-
-```bash
-cd df-analyze
-./run_python_with_home.sh test/test_main.py
-```
+It is *EXTREMELY* important that you only clone `df-analyze` into `$SCRATCH`, and
+do all processing there. You have a very limited amount of space and absolute
+number of files in your `$HOME` directory, and your login node will become
+nearly unusable if you clone `df-analyze` there, or build the container in
+`$HOME`. So just immediately `cd` to `SCRATCH` before doing any of the below.
 
 ### Building the Singularity Container
 
@@ -370,10 +522,81 @@ This should be built on a cluster that enables the `--fakeroot` option or on a
 Linux machine where you have `sudo` privileges, and the same architecture as
 the cluster (likely, x86_64).
 
+First, clone the repository to `$SCRATCH`:
+
 ```bash
-cd df-analyze/containers
+cd $SCRATCH
+git clone https://github.com/stfxecutables/df-analyze.git
+cd df-analyze
+```
+
+```bash
+cd $SCRATCH/df-analyze/containers
 ./build_container_cc.sh
 ```
+
+This will spam a lot of text to the terminal, but what you want to see at
+the end is a message very similar to:
+
+```txt
+==================================================================
+Container built successfully. Built container located at:
+/scratch/df-analyze/df_analyze.sif
+==================================================================
+```
+
+If you don't see this, or if somehow you see this message but there is no
+`df_analyze.sif` in the project root, then the complete container build log
+will be located in `df-analyze/containers/build.txt`. This `build.txt` file
+should be included with any bug reports or if encountering any issues when
+building the container.
+
+You can perform a final additional sanity test of the container build by then
+running the commands:
+
+```bash
+cd $SCRATCH/df-analyze/containers
+./check_install.sh
+```
+
+
+You should see some output like:
+
+```txt
+Running script from: /scratch/[...]/df-analyze
+Using Python 3.12.5
+df-analyze 3.2.3
+```
+
+but with of course the final version number depending on which release you have
+installed. Otherwise, there will be an error message and other information.
+
+### Using the Singularity Container
+
+If the singularity container `df_analyze.sif` is available in the project
+root, then it can be used to run arbitrary python scripts with the [helper
+script](https://github.com/stfxecutables/df-analyze/blob/master/run_python_with_home.sh)
+inlcluded in the repo. E.g.
+
+```bash
+cd $SCRATCH/df-analyze
+./run_python_with_home.sh test/test_main.py
+```
+
+**HOWEVER** this will frequently cause errors about files not being found.
+This has to do with aliasing and the complex file systems on Compute Canada
+and how these interact with path-mounting in Apptainer, but the solution is
+to **ALWAYS WRAP PATHS WITH THE `realpath` COMMAND**. E.g.
+
+```bash
+./run_python_with_home.sh df-embed.py \
+    --modality vision \
+    --data "$(realpath my_images.parquet)" \
+    --out "$(realpath embedded.parquet)"
+```
+
+this should be done if running a command in a login-node, or if making a job
+script to submit to the SLURM scheduler.
 
 # Analysis Pipeline
 
